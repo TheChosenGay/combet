@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/TheChosenGay/comet"
+	"github.com/TheChosenGay/combet"
 	"github.com/gorilla/websocket"
 )
 

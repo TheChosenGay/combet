@@ -7,7 +7,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/TheChosenGay/comet"
+	"github.com/TheChosenGay/combet"
 	wslib "github.com/gorilla/websocket"
 )
 

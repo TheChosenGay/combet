@@ -1,4 +1,4 @@
-module github.com/TheChosenGay/comet
+module github.com/TheChosenGay/combet
 
 go 1.25.3
 

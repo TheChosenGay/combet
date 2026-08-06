@@ -10,7 +10,7 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const tracerName = "github.com/TheChosenGay/comet"
+const tracerName = "github.com/TheChosenGay/combet"
 
 // Server 是协议无关的 comet server 接口。
 type Server interface {
