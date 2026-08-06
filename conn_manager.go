@@ -31,6 +31,14 @@ func (m *ConnManager) Push(c Conn) {
 	m.conns[c.ID()] = c
 }
 
+// Get 按连接 ID 取回 Conn。
+func (m *ConnManager) Get(connID string) (Conn, bool) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	c, ok := m.conns[connID]
+	return c, ok
+}
+
 // Pop 移除一条连接，同时清理其房间绑定。
 func (m *ConnManager) Pop(c Conn) {
 	m.mu.Lock()

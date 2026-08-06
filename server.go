@@ -72,6 +72,25 @@ func (c *Core) ConnManager() *ConnManager {
 	return c.cfg.ConnManager
 }
 
+// Send 向指定连接写一条语义消息（经 Scheme 编码）。
+// 连接不存在或写失败返回 false。业务层用它回复/推送单个连接。
+func (c *Core) Send(connID string, msg *Msg) bool {
+	conn, ok := c.cfg.ConnManager.Get(connID)
+	if !ok {
+		return false
+	}
+	data, err := c.scheme.Encode(msg)
+	if err != nil {
+		c.logger.Warn("send encode failed", "conn_id", connID, "err", err)
+		return false
+	}
+	if err := conn.Write(context.Background(), data); err != nil {
+		c.logger.Warn("send write failed", "conn_id", connID, "err", err)
+		return false
+	}
+	return true
+}
+
 // Push 向指定房间广播消息。
 func (c *Core) Push(roomID string, data []byte) int {
 	ctx, span := c.tracer.Start(context.Background(), "server.push",
