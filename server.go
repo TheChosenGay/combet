@@ -32,6 +32,11 @@ type ServerConfig struct {
 	// Scheme 协议编解码方案；nil 时使用默认帧协议（[2B type][payload]）。
 	// 换协议（如 pomelo）只需实现 MsgScheme 并注入。
 	Scheme MsgScheme
+	// Handshake 握手协商处理器；非 nil 时启用"握手阶段"：
+	// MsgHandshakeReq 走握手协商（不鉴权），客户端 ack 后业务消息才放行，
+	// 鉴权由业务层在后续数据消息（如 login 路由）中完成。
+	// nil 时保持旧行为：MsgHandshakeReq 即鉴权（Business.OnAuth + Bind）。
+	Handshake HandshakeHandler
 }
 
 // ============================================================
@@ -41,10 +46,11 @@ type ServerConfig struct {
 // Core 封装了消息分发、鉴权、心跳、推送等协议无关逻辑。
 // 各协议实现（ws.Server / tcp.Server）嵌入 *Core 复用。
 type Core struct {
-	cfg    ServerConfig
-	scheme MsgScheme
-	tracer trace.Tracer
-	logger *slog.Logger
+	cfg       ServerConfig
+	scheme    MsgScheme
+	handshake HandshakeHandler
+	tracer    trace.Tracer
+	logger    *slog.Logger
 }
 
 // NewCore 创建共享 dispatch 核心。
@@ -56,10 +62,11 @@ func NewCore(cfg ServerConfig) *Core {
 		cfg.Scheme = NewFrameScheme()
 	}
 	return &Core{
-		cfg:    cfg,
-		scheme: cfg.Scheme,
-		tracer: otel.Tracer(tracerName),
-		logger: slog.With("component", "comet"),
+		cfg:       cfg,
+		scheme:    cfg.Scheme,
+		handshake: cfg.Handshake,
+		tracer:    otel.Tracer(tracerName),
+		logger:    slog.With("component", "comet"),
 	}
 }
 
@@ -109,9 +116,25 @@ func (c *Core) Dispatch(ctx context.Context, conn Conn, raw []byte) {
 		ctx, span := c.tracer.Start(ctx, "ws.auth",
 			trace.WithAttributes(attribute.String("conn_id", conn.ID())))
 		defer span.End()
-		c.handleAuth(ctx, conn, msg.Payload)
+		if c.handshake != nil {
+			c.handleHandshake(ctx, conn, msg.Payload)
+		} else {
+			c.handleAuth(ctx, conn, msg.Payload)
+		}
+
+	case MsgHandshakeAck:
+		if c.handshake != nil {
+			c.cfg.ConnManager.MarkHandshaken(conn.ID())
+			c.logger.Info("handshake ack", "conn_id", conn.ID())
+		} else {
+			c.logger.Warn("unhandled msg type", "type", msg.Type, "conn_id", conn.ID())
+		}
 
 	case MsgData:
+		if c.handshake != nil && !c.cfg.ConnManager.IsHandshaken(conn.ID()) {
+			c.logger.Warn("data before handshake", "conn_id", conn.ID())
+			return
+		}
 		ctx, span := c.tracer.Start(ctx, "ws.message",
 			trace.WithAttributes(
 				attribute.String("conn_id", conn.ID()),
@@ -123,6 +146,15 @@ func (c *Core) Dispatch(ctx context.Context, conn Conn, raw []byte) {
 	default:
 		c.logger.Warn("unhandled msg type", "type", msg.Type, "conn_id", conn.ID())
 	}
+}
+
+// handleHandshake 握手协商（握手阶段）：把请求负载交给业务层，回握手响应。
+func (c *Core) handleHandshake(ctx context.Context, conn Conn, payload []byte) {
+	reply, err := c.handshake.OnHandshake(ctx, conn, payload)
+	if err != nil {
+		c.logger.Warn("handshake failed", "conn_id", conn.ID(), "err", err)
+	}
+	c.write(conn, &Msg{Type: MsgHandshakeResp, Payload: reply})
 }
 
 // write 把语义消息经 Scheme.Encode 编码后写入连接。
@@ -168,11 +200,13 @@ func (c *Core) handleAuth(ctx context.Context, conn Conn, payload []byte) {
 
 func (c *Core) handleMessage(ctx context.Context, conn Conn, payload []byte) {
 	userID := c.cfg.ConnManager.RoomOf(conn.ID())
-	if userID == "" {
+	if c.handshake == nil && userID == "" {
+		// 旧模式：握手即鉴权，未鉴权拒绝业务消息
 		c.logger.Warn("message from unauthenticated conn", "conn_id", conn.ID())
 		trace.SpanFromContext(ctx).SetStatus(codes.Error, "unauthenticated")
 		return
 	}
+	// 握手阶段：未登录（userID==""）也放行给业务层（如 login 消息），由业务层把关
 
 	span := trace.SpanFromContext(ctx)
 	span.SetAttributes(attribute.String("user_id", userID))

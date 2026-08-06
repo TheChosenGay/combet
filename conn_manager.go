@@ -7,18 +7,20 @@ import (
 
 // ConnManager 管理所有连接及其房间绑定，线程安全。
 type ConnManager struct {
-	mu       sync.RWMutex
-	conns    map[string]Conn            // connID → Conn
-	rooms    map[string]map[string]Conn // roomID → connID → Conn
-	connRoom map[string]string          // connID → roomID
+	mu         sync.RWMutex
+	conns      map[string]Conn            // connID → Conn
+	rooms      map[string]map[string]Conn // roomID → connID → Conn
+	connRoom   map[string]string          // connID → roomID
+	handshaken map[string]struct{}        // 握手阶段：已完成握手的连接
 }
 
 // NewConnManager 创建 ConnManager。
 func NewConnManager() *ConnManager {
 	return &ConnManager{
-		conns:    make(map[string]Conn),
-		rooms:    make(map[string]map[string]Conn),
-		connRoom: make(map[string]string),
+		conns:      make(map[string]Conn),
+		rooms:      make(map[string]map[string]Conn),
+		connRoom:   make(map[string]string),
+		handshaken: make(map[string]struct{}),
 	}
 }
 
@@ -35,6 +37,7 @@ func (m *ConnManager) Pop(c Conn) {
 	defer m.mu.Unlock()
 
 	delete(m.conns, c.ID())
+	delete(m.handshaken, c.ID())
 
 	roomID := m.connRoom[c.ID()]
 	if roomID == "" {
@@ -48,6 +51,21 @@ func (m *ConnManager) Pop(c Conn) {
 			delete(m.rooms, roomID)
 		}
 	}
+}
+
+// MarkHandshaken 标记连接已完成握手（握手阶段使用）。
+func (m *ConnManager) MarkHandshaken(connID string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.handshaken[connID] = struct{}{}
+}
+
+// IsHandshaken 判断连接是否已完成握手（握手阶段使用）。
+func (m *ConnManager) IsHandshaken(connID string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, ok := m.handshaken[connID]
+	return ok
 }
 
 // Bind 将连接绑定到指定房间（OnAuth 成功后调用）。
