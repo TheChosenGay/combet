@@ -32,11 +32,6 @@ type ServerConfig struct {
 	// Scheme 协议编解码方案；nil 时使用默认帧协议（[2B type][payload]）。
 	// 换协议（如 pomelo）只需实现 MsgScheme 并注入。
 	Scheme MsgScheme
-	// Handshake 握手协商处理器；非 nil 时启用"握手阶段"：
-	// MsgHandshakeReq 走握手协商（不鉴权），客户端 ack 后业务消息才放行，
-	// 鉴权由业务层在后续数据消息（如 login 路由）中完成。
-	// nil 时保持旧行为：MsgHandshakeReq 即鉴权（Business.OnAuth + Bind）。
-	Handshake HandshakeHandler
 }
 
 // ============================================================
@@ -61,10 +56,12 @@ func NewCore(cfg ServerConfig) *Core {
 	if cfg.Scheme == nil {
 		cfg.Scheme = NewFrameScheme()
 	}
+	// Business 可选实现 HandshakeHandler 来启用握手阶段（握手也由业务方处理）。
+	hs, _ := cfg.Business.(HandshakeHandler)
 	return &Core{
 		cfg:       cfg,
 		scheme:    cfg.Scheme,
-		handshake: cfg.Handshake,
+		handshake: hs,
 		tracer:    otel.Tracer(tracerName),
 		logger:    slog.With("component", "comet"),
 	}

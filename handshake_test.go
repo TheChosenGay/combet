@@ -25,18 +25,11 @@ func (testScheme) Decode(data []byte) (*Msg, error) {
 	return &Msg{Type: MsgType(data[0]), Payload: data[1:]}, nil
 }
 
-type fakeHandshake struct {
-	reply []byte
-	calls int
-}
-
-func (h *fakeHandshake) OnHandshake(_ context.Context, _ Conn, _ []byte) ([]byte, error) {
-	h.calls++
-	return h.reply, nil
-}
-
+// recordingBusiness 实现 Business + HandshakeHandler（握手阶段业务方）。
 type recordingBusiness struct {
-	msgs []string // "userID:payload"
+	msgs           []string // "userID:payload"
+	reply          []byte
+	handshakeCalls int
 }
 
 func (b *recordingBusiness) OnAuth(_ context.Context, _ []byte) (string, error) {
@@ -48,13 +41,29 @@ func (b *recordingBusiness) OnMessage(_ context.Context, _, userID string, paylo
 	return nil
 }
 
+func (b *recordingBusiness) OnHandshake(_ context.Context, _ Conn, _ []byte) ([]byte, error) {
+	b.handshakeCalls++
+	return b.reply, nil
+}
+
+// legacyBusiness 只实现 Business（旧模式：握手即鉴权）。
+type legacyBusiness struct {
+	msgs []string
+}
+
+func (b *legacyBusiness) OnAuth(_ context.Context, _ []byte) (string, error) { return "u1", nil }
+
+func (b *legacyBusiness) OnMessage(_ context.Context, _, userID string, payload []byte) error {
+	b.msgs = append(b.msgs, userID+":"+string(payload))
+	return nil
+}
+
 // TestHandshakeMode：握手 → ack → 业务消息放行；握手前数据被丢弃。
 func TestHandshakeMode(t *testing.T) {
-	biz := &recordingBusiness{}
+	biz := &recordingBusiness{reply: []byte(`{"code":200}`)}
 	core := NewCore(ServerConfig{
-		Business:  biz,
-		Scheme:    testScheme{},
-		Handshake: &fakeHandshake{reply: []byte(`{"code":200}`)},
+		Business: biz,
+		Scheme:   testScheme{},
 	})
 	conn := &fakeConn{}
 
@@ -81,7 +90,7 @@ func TestHandshakeMode(t *testing.T) {
 
 // TestLegacyMode：不注入 Handshake 时，未鉴权的业务消息被拒绝。
 func TestLegacyModeUnauthenticatedRejected(t *testing.T) {
-	biz := &recordingBusiness{}
+	biz := &legacyBusiness{}
 	core := NewCore(ServerConfig{Business: biz, Scheme: testScheme{}})
 	conn := &fakeConn{}
 
@@ -101,9 +110,8 @@ func TestLegacyModeUnauthenticatedRejected(t *testing.T) {
 // TestHandshakeStateCleanedOnPop：连接断开后握手状态被清理。
 func TestHandshakeStateCleanedOnPop(t *testing.T) {
 	core := NewCore(ServerConfig{
-		Business:  &recordingBusiness{},
-		Scheme:    testScheme{},
-		Handshake: &fakeHandshake{reply: []byte("ok")},
+		Business: &recordingBusiness{reply: []byte("ok")},
+		Scheme:   testScheme{},
 	})
 	conn := &fakeConn{}
 	core.Dispatch(context.Background(), conn, []byte{byte(MsgHandshakeAck)})
