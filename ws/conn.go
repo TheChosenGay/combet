@@ -34,21 +34,32 @@ type Conn struct {
 
 	closedMu sync.Mutex
 	closed   bool
+
+	readTimeout time.Duration // 单次读取超时（心跳/任意帧都会重置；0 = 默认 120s）
 }
 
 // New 创建 WebSocket Conn。
 // onRead 在读到完整帧时被调用（在 ReadLoop goroutine 中）。
-func New(ws *websocket.Conn, onRead func([]byte)) *Conn {
+func New(ws *websocket.Conn, onRead func([]byte), readTimeout time.Duration) *Conn {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Conn{
-		id:     uuid.NewString(),
-		ws:     ws,
-		onRead: onRead,
-		logger: slog.With("component", "ws"),
-		send:   make(chan []byte, defaultSendBuf),
-		ctx:    ctx,
-		cancel: cancel,
+		id:          uuid.NewString(),
+		ws:          ws,
+		onRead:      onRead,
+		logger:      slog.With("component", "ws"),
+		send:        make(chan []byte, defaultSendBuf),
+		ctx:         ctx,
+		cancel:      cancel,
+		readTimeout: readTimeout,
 	}
+}
+
+// ReadTimeout 返回连接级读超时（0 = 默认 120s）。
+func (c *Conn) ReadTimeout() time.Duration {
+	if c.readTimeout <= 0 {
+		return 120 * time.Second
+	}
+	return c.readTimeout
 }
 
 // ID 返回连接唯一标识。
@@ -88,7 +99,7 @@ func (c *Conn) ReadLoop() error {
 		default:
 		}
 
-		if err := c.ws.SetReadDeadline(time.Now().Add(120 * time.Second)); err != nil {
+		if err := c.ws.SetReadDeadline(time.Now().Add(c.ReadTimeout())); err != nil {
 			return err
 		}
 

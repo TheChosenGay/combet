@@ -18,6 +18,9 @@ type Server struct {
 	addr    string
 	logger  *slog.Logger
 	httpSrv *http.Server
+	// ReadTimeout 连接读超时（心跳/任意帧重置；0 = 默认 120s）。超时后连接关闭，
+	// 由业务层（如网关 sweeper）检测并踢线——心跳超时踢线靠这个可配置阈值。
+	ReadTimeout time.Duration
 }
 
 // NewServer 创建 WebSocket comet server（便捷构造，内部创建 Core）。
@@ -81,7 +84,7 @@ func (s *Server) handleWS(w http.ResponseWriter, r *http.Request) {
 	var conn *Conn
 	conn = New(rawWS, func(raw []byte) {
 		s.Core.Dispatch(ctx, conn, raw)
-	})
+	}, s.ReadTimeout)
 	conn.SetLogger(s.logger.With("conn_id", conn.ID()))
 
 	s.Core.ConnManager().Push(conn)
