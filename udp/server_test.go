@@ -3,6 +3,7 @@ package udp_test
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"math/rand"
@@ -304,6 +305,130 @@ func TestUDPHighConnectionLeak(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	t.Fatalf("goroutine leak after %d conns: base=%d now=%d", n, base, runtime.NumGoroutine())
+}
+
+// TestUDPRampUpTransferLeak 分批渐增连接直到 10000，每批校验连接数，
+// 全部建立后并发让所有连接传输数据（send + echo 校验），最后关服检查泄漏。
+// 用 -short 可跳过。
+func TestUDPRampUpTransferLeak(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping 10k ramp-up transfer leak test in -short mode")
+	}
+	const (
+		total   = 10000
+		batch   = 1000
+		workers = 256
+	)
+
+	base := runtime.NumGoroutine()
+	srv, cancel := newTestServer(t, &testBiz{echo: true}, udp.Config{})
+	defer cancel()
+
+	clients := make([]*client.UDPConn, total)
+	chs := make([]chan []byte, total)
+
+	// 分批并发建连，逐渐增加连接量
+	for off := 0; off < total; off += batch {
+		end := min(off+batch, total)
+		var (
+			wg      sync.WaitGroup
+			mu      sync.Mutex
+			dialErr error
+		)
+		sem := make(chan struct{}, workers)
+		for i := off; i < end; i++ {
+			sem <- struct{}{}
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				defer func() { <-sem }()
+				c, err := client.DialUDP(context.Background(), srv.Addr(), "token")
+				if err != nil {
+					mu.Lock()
+					if dialErr == nil {
+						dialErr = err
+					}
+					mu.Unlock()
+					return
+				}
+				ch := make(chan []byte, 1)
+				c.OnMessage(func(p []byte) { ch <- p })
+				clients[i] = c
+				chs[i] = ch
+			}(i)
+		}
+		wg.Wait()
+		if dialErr != nil {
+			t.Fatalf("dial batch [%d,%d) failed: %v", off, end, dialErr)
+		}
+		if got := srv.ConnCount(); got != end {
+			t.Fatalf("after batch up to %d: ConnCount=%d want %d", end, got, end)
+		}
+	}
+
+	// 全部建立：并发让所有连接传输数据并校验 echo
+	if err := echoAll(clients, chs, 0, total, workers); err != nil {
+		t.Fatalf("echo all failed: %v", err)
+	}
+
+	// 关闭全部客户端 + 关服
+	for _, c := range clients {
+		_ = c.Close()
+	}
+	cancel()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= base+20 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("goroutine leak after %d ramp-up conns: base=%d now=%d", total, base, runtime.NumGoroutine())
+}
+
+func echoAll(clients []*client.UDPConn, chs []chan []byte, from, to, workers int) error {
+	payload := []byte("ping-batch")
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+	)
+	sem := make(chan struct{}, workers)
+	for i := from; i < to; i++ {
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := clients[i].Send(payload); err != nil {
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				mu.Unlock()
+				return
+			}
+			select {
+			case p := <-chs[i]:
+				if string(p) != string(payload) {
+					mu.Lock()
+					if firstErr == nil {
+						firstErr = fmt.Errorf("echo mismatch at %d: %q", i, p)
+					}
+					mu.Unlock()
+				}
+			case <-time.After(5 * time.Second):
+				mu.Lock()
+				if firstErr == nil {
+					firstErr = fmt.Errorf("timeout waiting echo at %d", i)
+				}
+				mu.Unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+	return firstErr
 }
 
 func waitFor(t *testing.T, cond func() bool) {
