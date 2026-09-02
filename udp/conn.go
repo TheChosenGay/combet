@@ -11,7 +11,6 @@ import (
 	"errors"
 	"log/slog"
 	"net"
-	"sync"
 	"sync/atomic"
 	"time"
 
@@ -102,13 +101,12 @@ type Conn struct {
 
 	logger *slog.Logger
 
-	closedMu sync.Mutex
-	closed   bool
-
 	lastActive atomic.Int64
 
 	reassembler *Reassembler
 	msgID       uint16 // 分片唯一标识，仅 WritePump goroutine 访问
+
+	closed atomic.Bool
 }
 
 // NewConn 创建一条 UDP 会话。pc 为共享 PacketConn，addr 为对端地址。
@@ -180,13 +178,10 @@ func (c *Conn) Start() {
 
 // Close 关闭会话并触发清理回调。幂等。
 func (c *Conn) Close() error {
-	c.closedMu.Lock()
-	if c.closed {
-		c.closedMu.Unlock()
+	// 仅一个 goroutine 能完成关闭动作（幂等），避免重复触发 onClose。
+	if !c.closed.CompareAndSwap(false, true) {
 		return nil
 	}
-	c.closed = true
-	c.closedMu.Unlock()
 
 	c.cancel()
 	if c.onClose != nil {
@@ -196,9 +191,7 @@ func (c *Conn) Close() error {
 }
 
 func (c *Conn) isClosed() bool {
-	c.closedMu.Lock()
-	defer c.closedMu.Unlock()
-	return c.closed
+	return c.closed.Load()
 }
 
 // process 消费读队列，重组分片后回调 onFrame。

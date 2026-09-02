@@ -82,7 +82,10 @@ func (s *Server) readLoop(ctx context.Context) {
 			s.logger.Error("read error", "err", err)
 			continue
 		}
-		// 拷贝，因为 process goroutine 异步消费读缓冲。
+
+		// 必须拷贝：buf 被复用，而读到的字节会投递到会话的 process goroutine 异步消费；
+		// 若直接把 buf[:n] 交给它，下一次 ReadFrom 会覆盖上一个还没处理完的帧，造成跨
+		// goroutine 数据竞争。若要避免拷贝，可用 sync.Pool + 交给 consumer 释放。
 		pkt := make([]byte, n)
 		copy(pkt, buf[:n])
 
@@ -161,6 +164,8 @@ func (s *Server) gcOnce() {
 	}
 	s.mu.RUnlock()
 
+	// 不能在持有 RLock 时调用 c.Close()：onClose→remove 需要获取 s.mu.Lock()，
+	// 在持读锁时升级写锁会发生 RWMutex 阻塞死锁。所以先快照，释放锁后再关闭。
 	for _, c := range closeList {
 		_ = c.Close() // onClose 会 remove(byAddr) + ConnManager.Pop
 	}
@@ -186,6 +191,7 @@ func (s *Server) shutdown() {
 		all = append(all, c)
 	}
 	s.mu.RUnlock()
+	// 同样不能持 RLock 去 Close（会在 remove 里卡在升级写锁上）。
 	for _, c := range all {
 		_ = c.Close()
 	}
