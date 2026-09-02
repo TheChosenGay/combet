@@ -5,6 +5,7 @@ import (
 	"context"
 	"io"
 	"log/slog"
+	"math/rand"
 	"net"
 	"runtime"
 	"sync/atomic"
@@ -165,6 +166,81 @@ func TestUDPIdleReapUnauthed(t *testing.T) {
 
 	waitFor(t, func() bool { return srv.ConnCount() == 1 })
 	waitFor(t, func() bool { return srv.ConnCount() == 0 })
+}
+
+func TestUDPGoroutineLeak(t *testing.T) {
+	base := runtime.NumGoroutine()
+	srv, cancel := newTestServer(t, &testBiz{echo: true}, udp.Config{})
+
+	const n = 16
+	clients := make([]*client.UDPConn, n)
+	for i := range clients {
+		c, err := client.DialUDP(context.Background(), srv.Addr(), "token")
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.OnMessage(func([]byte) {})
+		clients[i] = c
+	}
+
+	for _, c := range clients {
+		_ = c.Close()
+	}
+	cancel() // 触发 shutdown，服务端显式关闭全部会话
+
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= base+5 {
+			return
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("goroutine leak: base=%d now=%d", base, runtime.NumGoroutine())
+}
+
+// TestUDPPacketLossSnapshotSurvival 模拟 10% datagram 丢失下，大快照(分片)与小增量(单包)的存活率。
+// 说明：UDP 分片是"尽力而为"，丢一片即整条失败；小单包则各自独立。
+func TestUDPPacketLossSnapshotSurvival(t *testing.T) {
+	const (
+		maxSeg = 1400
+		msgs   = 200
+		drop   = 0.10
+	)
+	rng := rand.New(rand.NewSource(42))
+
+	big := bytes.Repeat([]byte("A"), 10000) // 10KB 快照，分 ~8 片
+	small := bytes.Repeat([]byte("b"), 30)  // 30B 增量，单包
+
+	bigOK, smallOK := 0, 0
+	for m := 0; m < msgs; m++ {
+		// 大快照：每片独立丢，丢任何一片则该消息不完整
+		bd := udp.PackFrame(big, maxSeg, uint16(m*2))
+		br := udp.NewReassembler(64<<10, maxSeg, 8)
+		completed := false
+		for _, d := range bd {
+			if rng.Float64() < drop {
+				continue
+			}
+			if _, ok := br.Feed(d); ok {
+				completed = true
+				break
+			}
+		}
+		if completed {
+			bigOK++
+		}
+
+		// 小增量：单包，独立丢失
+		sd := udp.PackFrame(small, maxSeg, uint16(m*2+1))
+		if rng.Float64() >= drop {
+			if _, ok := udp.NewReassembler(64<<10, maxSeg, 8).Feed(sd[0]); ok {
+				smallOK++
+			}
+		}
+	}
+
+	t.Logf("10%% loss: big(10KB fragmented) survived %d/%d, small(30B single) survived %d/%d",
+		bigOK, msgs, smallOK, msgs)
 }
 
 func waitFor(t *testing.T, cond func() bool) {
