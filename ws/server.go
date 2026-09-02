@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"net"
 	"net/http"
 	"time"
 
@@ -22,8 +21,6 @@ type Server struct {
 	// ReadTimeout 连接读超时（心跳/任意帧重置；0 = 默认 120s）。超时后连接关闭，
 	// 由业务层（如网关 sweeper）检测并踢线——心跳超时踢线靠这个可配置阈值。
 	ReadTimeout time.Duration
-
-	ready chan struct{}
 }
 
 // NewServer 创建 WebSocket comet server（便捷构造，内部创建 Core）。
@@ -37,15 +34,8 @@ func NewServerWithCore(addr string, core *comet.Core) *Server {
 		Core:   core,
 		addr:   addr,
 		logger: slog.With("component", "ws-server"),
-		ready:  make(chan struct{}),
 	}
 }
-
-// Addr 返回绑定后的地址（Start 后为实际端口）。
-func (s *Server) Addr() string { return s.addr }
-
-// Ready 在监听建立后关闭，用于测试等待服务就绪。
-func (s *Server) Ready() <-chan struct{} { return s.ready }
 
 var upgrader = wslib.Upgrader{
 	ReadBufferSize:  4096,
@@ -59,20 +49,14 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/ws", s.handleWS)
 
 	s.httpSrv = &http.Server{
+		Addr:    s.addr,
 		Handler: mux,
 	}
-
-	ln, err := net.Listen("tcp", s.addr)
-	if err != nil {
-		return err
-	}
-	s.addr = ln.Addr().String()
-	close(s.ready)
 
 	errCh := make(chan error, 1)
 	go func() {
 		s.logger.Info("websocket server starting", "addr", s.addr)
-		if err := s.httpSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		if err := s.httpSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			errCh <- err
 		}
 	}()

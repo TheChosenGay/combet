@@ -8,6 +8,7 @@ import (
 	"math/rand"
 	"net"
 	"runtime"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -241,6 +242,68 @@ func TestUDPPacketLossSnapshotSurvival(t *testing.T) {
 
 	t.Logf("10%% loss: big(10KB fragmented) survived %d/%d, small(30B single) survived %d/%d",
 		bigOK, msgs, smallOK, msgs)
+}
+
+// TestUDPHighConnectionLeak 在高并发下建立 10000 条 UDP 会话，验证容量与不泄漏。
+// 用 -short 可跳过（默认 go test 会长跑几秒）。
+func TestUDPHighConnectionLeak(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping 10k connection leak test in -short mode")
+	}
+	const n = 10000
+
+	base := runtime.NumGoroutine()
+	srv, cancel := newTestServer(t, &testBiz{}, udp.Config{})
+	defer cancel()
+
+	clients := make([]*client.UDPConn, n)
+	var (
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		dialErr error
+	)
+	sem := make(chan struct{}, 256) // 控制并发建连数
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			c, err := client.DialUDP(context.Background(), srv.Addr(), "token")
+			if err != nil {
+				mu.Lock()
+				if dialErr == nil {
+					dialErr = err
+				}
+				mu.Unlock()
+				return
+			}
+			c.OnMessage(func([]byte) {})
+			clients[i] = c
+		}(i)
+	}
+	wg.Wait()
+	if dialErr != nil {
+		t.Fatalf("dial failed: %v", dialErr)
+	}
+	if got := srv.ConnCount(); got != n {
+		t.Fatalf("ConnCount = %d, want %d", got, n)
+	}
+
+	// 关闭全部客户端 + 关服（服务端 shutdown 显式关闭所有会话）
+	for _, c := range clients {
+		_ = c.Close()
+	}
+	cancel()
+
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		if runtime.NumGoroutine() <= base+20 {
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	t.Fatalf("goroutine leak after %d conns: base=%d now=%d", n, base, runtime.NumGoroutine())
 }
 
 func waitFor(t *testing.T, cond func() bool) {
