@@ -93,7 +93,13 @@ func DialUDP(ctx context.Context, addr, token string) (*UDPConn, error) {
 		return nil, fmt.Errorf("client: read auth reply: %w", err)
 	}
 	frame, ok := c.reassembler.Feed(buf[:n])
-	if !ok || !udpAuthOK(frame) {
+	if !ok {
+		c.Close()
+		return nil, ErrUDPAuthFailed
+	}
+	reply, err := scheme.Decode(frame)
+	if err != nil || reply.Type != comet.MsgHandshakeResp ||
+		len(reply.Payload) == 0 || reply.Payload[0] != 1 {
 		c.Close()
 		return nil, ErrUDPAuthFailed
 	}
@@ -103,13 +109,6 @@ func DialUDP(ctx context.Context, addr, token string) (*UDPConn, error) {
 	go c.WritePump()
 	go c.ReadLoop()
 	return c, nil
-}
-
-// udpAuthOK 判断鉴权成功应答。
-// 服务端对 MsgHandshakeResp(成功) 编成裸 2 字节 [0x00, 0x01]（frameScheme 编码），
-// 用裸字节比对，而不走 scheme.Decode——因为该 2 字节与 TypeHeartbeat 帧头重合。
-func udpAuthOK(frame []byte) bool {
-	return len(frame) == 2 && frame[0] == 0x00 && frame[1] == 0x01
 }
 
 // Send 发送业务消息。
@@ -168,6 +167,8 @@ func (c *UDPConn) ReadLoop() error {
 		switch msg.Type {
 		case comet.MsgHeartbeatReq:
 			c.sendHeartbeatReply()
+		case comet.MsgHeartbeatAck:
+			// 服务端对心跳的应答，客户端无需额外处理。
 		case comet.MsgData:
 			c.msgMu.Lock()
 			fn := c.onMessage

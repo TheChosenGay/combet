@@ -10,7 +10,10 @@ func TestFrameSchemeRoundTrip(t *testing.T) {
 	s := NewFrameScheme()
 	cases := []*Msg{
 		{Type: MsgHeartbeatReq, Payload: nil},
+		{Type: MsgHeartbeatAck, Payload: nil},
 		{Type: MsgHandshakeReq, Payload: []byte("token")},
+		{Type: MsgHandshakeResp, Payload: []byte{0x01}},
+		{Type: MsgHandshakeResp, Payload: []byte{0x00}},
 		{Type: MsgData, Payload: []byte("hello")},
 	}
 	for _, m := range cases {
@@ -31,15 +34,15 @@ func TestFrameSchemeRoundTrip(t *testing.T) {
 func TestFrameSchemeReplies(t *testing.T) {
 	s := NewFrameScheme()
 	hb, err := s.Encode(&Msg{Type: MsgHeartbeatAck})
-	if err != nil || !bytes.Equal(hb, []byte{0x00, 0x00}) {
+	if err != nil || !bytes.Equal(hb, []byte{0x00, 0x05}) {
 		t.Fatalf("heartbeat ack = %v, %v", hb, err)
 	}
 	ok, err := s.Encode(&Msg{Type: MsgHandshakeResp, Payload: []byte{0x01}})
-	if err != nil || !bytes.Equal(ok, []byte{0x00, 0x01}) {
+	if err != nil || !bytes.Equal(ok, []byte{0x00, 0x04, 0x01}) {
 		t.Fatalf("auth ok = %v, %v", ok, err)
 	}
 	fail, err := s.Encode(&Msg{Type: MsgHandshakeResp, Payload: []byte{0x00}})
-	if err != nil || !bytes.Equal(fail, []byte{0x00, 0x00}) {
+	if err != nil || !bytes.Equal(fail, []byte{0x00, 0x04, 0x00}) {
 		t.Fatalf("auth fail = %v, %v", fail, err)
 	}
 }
@@ -86,7 +89,7 @@ func TestDispatchHeartbeat(t *testing.T) {
 	core := NewCore(ServerConfig{Business: &fakeBusiness{}})
 	conn := &fakeConn{}
 	core.Dispatch(context.Background(), conn, []byte{0x00, 0x01})
-	if len(conn.written) != 1 || !bytes.Equal(conn.written[0], []byte{0x00, 0x00}) {
+	if len(conn.written) != 1 || !bytes.Equal(conn.written[0], []byte{0x00, 0x05}) {
 		t.Fatalf("heartbeat reply = %v", conn.written)
 	}
 }
@@ -95,7 +98,7 @@ func TestDispatchAuth(t *testing.T) {
 	core := NewCore(ServerConfig{Business: &fakeBusiness{authOK: true}})
 	conn := &fakeConn{}
 	core.Dispatch(context.Background(), conn, append([]byte{0x00, 0x02}, "token"...))
-	if len(conn.written) != 1 || !bytes.Equal(conn.written[0], []byte{0x00, 0x01}) {
+	if len(conn.written) != 1 || !bytes.Equal(conn.written[0], []byte{0x00, 0x04, 0x01}) {
 		t.Fatalf("auth reply = %v", conn.written)
 	}
 }

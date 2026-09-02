@@ -61,6 +61,10 @@ func (frameScheme) Decode(data []byte) (*Msg, error) {
 		return &Msg{Type: MsgHandshakeReq, Payload: payload}, nil
 	case header == TypeMessage:
 		return &Msg{Type: MsgData, Payload: payload}, nil
+	case header == TypeHandshakeResp:
+		return &Msg{Type: MsgHandshakeResp, Payload: payload}, nil
+	case header == TypeHeartbeatAck:
+		return &Msg{Type: MsgHeartbeatAck, Payload: payload}, nil
 	default:
 		return nil, ErrUnknownMsgType
 	}
@@ -75,14 +79,11 @@ func (frameScheme) Encode(msg *Msg) ([]byte, error) {
 	case MsgHeartbeatReq:
 		return append(TypeHeartbeat[:], msg.Payload...), nil
 	case MsgHeartbeatAck:
-		return HeartbeatReply[:], nil
+		return append(TypeHeartbeatAck[:], msg.Payload...), nil
 	case MsgHandshakeReq:
 		return append(TypeAuth[:], msg.Payload...), nil
 	case MsgHandshakeResp:
-		if len(msg.Payload) > 0 && msg.Payload[0] == 1 {
-			return []byte{0x00, 0x01}, nil // 成功
-		}
-		return []byte{0x00, 0x00}, nil // 失败
+		return append(TypeHandshakeResp[:], msg.Payload...), nil
 	case MsgData:
 		return append(TypeMessage[:], msg.Payload...), nil
 	default:
